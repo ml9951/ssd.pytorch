@@ -53,10 +53,10 @@ class VOC(data.Dataset):
                 bbox = obj.find('bndbox')
                 if keep_difficult or obj.find('difficult').text == '0':
                     current['objects'].append((
-                        float(bbox.find('xmin').text) / width,
-                        float(bbox.find('ymin').text) / height,
-                        float(bbox.find('xmax').text) / width,
-                        float(bbox.find('ymax').text) / height,
+                        float(bbox.find('xmin').text),
+                        float(bbox.find('ymin').text),
+                        float(bbox.find('xmax').text),
+                        float(bbox.find('ymax').text),
                         float(class_map[obj.find('name').text])
                     ))
             if len(current['objects']) > 0:
