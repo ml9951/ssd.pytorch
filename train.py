@@ -69,7 +69,6 @@ def train(net, args):
     data_loader = data.DataLoader(dataset, args.batch_size, # num_workers=args.num_workers,
                                   shuffle=True, collate_fn=detection_collate)
     N = len(data_loader)
-    DSN = len(dataset)
 
     mk_var = lambda x: Variable(x.cuda() if args.cuda else x)
 
@@ -94,9 +93,9 @@ def train(net, args):
             loc_loss += loss_l.data[0]
             conf_loss += loss_c.data[0]
 
-            args.writer.add_scalar('data/loss', loss.data[0], DSN * epoch + i)
-            args.writer.add_scalar('data/loss_l', loss_l.data[0], DSN * epoch + i)
-            args.writer.add_scalar('data/loss_c', loss_c.data[0], DSN * epoch + i)
+            args.writer.add_scalar('data/loss', loss.data[0], N * epoch + i)
+            args.writer.add_scalar('data/loss_l', loss_l.data[0], N * epoch + i)
+            args.writer.add_scalar('data/loss_c', loss_c.data[0], N * epoch + i)
 
             # if i % 10 == 0:
             #     ridx = np.random.randint(0, args.batch_size)
