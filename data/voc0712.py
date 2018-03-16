@@ -67,13 +67,11 @@ class VOC(data.Dataset):
 
     def __getitem__(self, idx):
         anno = self.annos[idx]
-        img = cv2.imread(anno['img'])
-        target = np.array(anno['objects'])
+        img = Image.open(anno['img'])
+        target = torch.Tensor(anno['objects'])
         if self.transform:
-            img, boxes, labels = self.transform(img, target[:, :4], target[:, 4])
-            img = img.transpose((2, 0, 1))[(2, 1, 0), :, :]
-            target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
-        return torch.from_numpy(img).float(), torch.from_numpy(target).float(), anno['height'], anno['width']
+            img, target = self.transform(img, target)
+        return img, target, anno['height'], anno['width']
 
 def detection_collate(batch):
     """Custom collate fn for dealing with batches of images that have a different
@@ -90,3 +88,10 @@ def detection_collate(batch):
     imgs, targets, heights, widths = zip(*batch)
     return torch.stack(imgs, 0), targets
     
+
+if __name__ == '__main__':
+    ds = VOC('../../data1/VOCdevkit/VOC2012')
+
+    img, target, height, width = ds[0]
+    pdb.set_trace()
+

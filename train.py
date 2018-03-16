@@ -1,8 +1,9 @@
 #!/usr/bin/env python
-import os
+import os, pdb, cv2
 import torch
 import torch.optim as optim
 import torch.utils.data as data
+import torch.nn.functional as F
 from torch.autograd import Variable
 import argparse
 from data import detection_collate, VOCroot, VOC_CLASSES, VOC
@@ -13,20 +14,20 @@ import numpy as np
 import time
 from subprocess import check_output
 from datetime import datetime
+from retina import Retina
+from torchvision import transforms
+from tensorboardX import SummaryWriter
+import torchvision.utils as vutils
+from layers import point_form
 
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
-
-def init_weights(m):
-    if isinstance(m, torch.nn.Conv2d):
-        torch.nn.init.xavier_uniform(m.weight.data)
-        m.bias.data.zero_()
 
 def save_checkpoint(net, args, iter, filename):
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     torch.save({
         'iter': iter,
-        'state_dict' : net.module.state_dict()
+        'state_dict' : net.state_dict()
     }, filename)
 
 def load_checkpoint(net, args):
@@ -35,15 +36,24 @@ def load_checkpoint(net, args):
         args.start_iter = chkpnt['iter']
         net.load_state_dict(chkpnt['state_dict'])
     else:
-        if not os.path.exists(os.path.join(args.save_folder, args.basenet)):
-            url = 'https://s3.amazonaws.com/amdegroot-models/vgg16_reducedfc.pth'
-            check_output(['wget', url, '-O', os.path.join(args.save_folder, args.basenet)])
+        net.init_weights()
 
-        vgg_weights = torch.load(os.path.join(args.save_folder, args.basenet))
-        net.vgg.load_state_dict(vgg_weights)
-        net.extras.apply(init_weights)
-        net.loc.apply(init_weights)
-        net.conf.apply(init_weights)
+_transform = transforms.Compose([
+    transforms.Resize((300, 300)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+def transform(img, target):
+    '''
+    img : PIL image
+    target ndarray[N, 5] - minx, miny, maxx, maxy, class
+    '''
+    img_data = _transform(img)
+
+    target[:, (0, 2)] /= float(img.width)
+    target[:, (1, 3)] /= float(img.height)
+    return img_data, target
 
 def train(net, args):
     optimizer = optim.SGD(net.parameters(), lr=args.lr,
@@ -55,10 +65,11 @@ def train(net, args):
     loc_loss = 0  # epoch
     conf_loss = 0
 
-    dataset = VOC(args.voc_root, transform=SSDAugmentation(args.ssd_size, args.means))
-    data_loader = data.DataLoader(dataset, args.batch_size, num_workers=args.num_workers,
-                                  shuffle=True, collate_fn=detection_collate, pin_memory=True)
+    dataset = VOC(args.voc_root, transform=transform)
+    data_loader = data.DataLoader(dataset, args.batch_size, # num_workers=args.num_workers,
+                                  shuffle=True, collate_fn=detection_collate)
     N = len(data_loader)
+    DSN = len(dataset)
 
     mk_var = lambda x: Variable(x.cuda() if args.cuda else x)
 
@@ -80,9 +91,33 @@ def train(net, args):
             loss.backward()
             optimizer.step()
 
-
             loc_loss += loss_l.data[0]
             conf_loss += loss_c.data[0]
+
+            args.writer.add_scalar('data/loss', loss.data[0], DSN * epoch + i)
+            args.writer.add_scalar('data/loss_l', loss_l.data[0], DSN * epoch + i)
+            args.writer.add_scalar('data/loss_c', loss_c.data[0], DSN * epoch + i)
+
+            # if i % 10 == 0:
+            #     ridx = np.random.randint(0, args.batch_size)
+            #     loc, conf, _ = list(zip(*out))[ridx]
+            #     img = images[ridx].data.cpu().numpy().transpose((1,2,0))
+
+            #     loc = point_form(loc)
+            #     probs = F.softmax(conf, dim=1)
+            #     max_vals, max_inds = probs[:, 1:].max(dim=1)
+            #     scores, indices = max_vals.sort(descending=True)
+
+            #     N = min(100, max((scores > 0.2).sum().data[0], 5))
+            #     for i in range(N):
+            #         box = loc[indices[i]].clamp(0, 1).squeeze()
+            #         if box[0].data[0] > box[2].data[0] or box[1].data[0] > box[3].data[0]:
+            #             break
+            #         box *= 300
+            #         box[:, (0, 2)] +
+            #         cv2.rectangle()
+
+            #         pdb.set_trace()
 
             print('%d: [%d/%d] || Loss: %.4f' % (epoch, i, N, loss.data[0]))
 
@@ -108,7 +143,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', default=4, type=int, help='Number of workers used in dataloading')
     parser.add_argument('--iterations', default=120000, type=int, help='Number of training iterations')
     parser.add_argument('--cuda', default=True, type=str2bool, help='Use cuda to train model')
-    parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float, help='initial learning rate')
+    parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='initial learning rate')
     parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
     parser.add_argument('--weight_decay', default=5e-4, type=float, help='Weight decay for SGD')
     parser.add_argument('--gamma', default=0.1, type=float, help='Gamma update for SGD')
@@ -123,13 +158,16 @@ if __name__ == '__main__':
     args.num_classes = len(VOC_CLASSES) + 1
     args.stepvalues = (20, 50, 70)
     args.start_iter = 0
+    args.writer = SummaryWriter()
 
     os.makedirs(args.save_folder, exist_ok = True)
 
     default_type = 'torch.cuda.FloatTensor' if args.cuda else 'torch.FloatTensor'
     torch.set_default_tensor_type(default_type)
 
-    net = build_ssd('train', args.ssd_size, args.num_classes)
+    # net = build_ssd('train', args.ssd_size, args.num_classes)
+
+    net = Retina(VOC_CLASSES)
 
     if args.cuda:
         net = net.cuda()
