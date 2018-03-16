@@ -108,7 +108,7 @@ class Retina(torch.nn.Module):
         if not self.training:
             return self.detect(
                 loc,                                # loc preds
-                F.softmax(conf, dim=1),                 # conf preds
+                F.softmax(conf, dim=2),                 # conf preds
                 self.priors.type(type(x.data))      # default boxes
             )
         else:
