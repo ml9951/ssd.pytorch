@@ -2,7 +2,7 @@ from .voc0712 import VOC, detection_collate, VOC_CLASSES
 from .config import *
 import cv2
 import numpy as np
-
+from .spacenet import SpaceNet
 
 def base_transform(image, size, mean):
     x = cv2.resize(image, (size, size)).astype(np.float32)

@@ -1,11 +1,10 @@
 from torchvision.models import resnet101
 import pdb, torch
 import torch.nn.functional as F
-from data import v3
-from layers import *
+from layers import prior_box, Detect
 
 class Retina(torch.nn.Module):
-    ANCHORS_PER_GRID_CELL = 6
+    ANCHORS_PER_GRID_CELL = 9
 
     def mk_subnet(self, out_factor, include_sigmoid = True):
         layers = []
@@ -29,10 +28,12 @@ class Retina(torch.nn.Module):
                 torch.nn.init.xavier_normal(layer.weight)
                 layer.bias.data.zero_()
 
-    def __init__(self, classes):
+    def __init__(self, classes, size):
         super(Retina, self).__init__()
 
-        self.priors = torch.autograd.Variable(PriorBox(v3).forward(), requires_grad=False)
+        self.size = size
+
+        self.priors = torch.autograd.Variable(prior_box(size), requires_grad=False)
 
         mask = ((self.priors[:,2] > self.priors[:,0]) & (self.priors[:,3] > self.priors[:,1]))
 
@@ -58,6 +59,7 @@ class Retina(torch.nn.Module):
         self.conv5 = torch.nn.Conv2d(2048, 256, 3, padding=1)
         self.conv4 = torch.nn.Conv2d(1024, 256, 1)
         self.conv3 = torch.nn.Conv2d(512, 256, 1)
+        self.conv2 = torch.nn.Conv2d(256, 256, 1)
 
         self.loc = self.mk_subnet(4, include_sigmoid=False)
         self.conf = self.mk_subnet(self.num_classes, include_sigmoid = False)
@@ -87,11 +89,12 @@ class Retina(torch.nn.Module):
         # is not of a size that is divisible by a power of 2
         p4 = F.upsample(p5, size=tuple(c4.shape[2:4]), mode='bilinear') + self.conv4(c4)
         p3 = F.upsample(p4, size=tuple(c3.shape[2:4]), mode='bilinear') + self.conv3(c3)
+        p2 = F.upsample(p3, size=tuple(c2.shape[2:4]), mode='bilinear') + self.conv2(c2)
 
         loc_pred, conf_pred = [], []
 
         # Localization/Classification
-        for fm in [p3, p4, p5, p6, p7]:
+        for fm in [p2, p3]: #, p4, p5, p6, p7]:
             locs = self.loc(fm).permute((0, 2, 3, 1))
             confs = self.conf(fm).permute((0, 2, 3, 1))
 
@@ -102,9 +105,9 @@ class Retina(torch.nn.Module):
             loc_pred.append(locs)
             conf_pred.append(confs)
 
-
         loc = torch.cat(loc_pred, dim=1)
         conf = torch.cat(conf_pred, dim=1)
+
         if not self.training:
             return self.detect(
                 loc,                                # loc preds

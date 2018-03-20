@@ -6,9 +6,9 @@ import torch.utils.data as data
 import torch.nn.functional as F
 from torch.autograd import Variable
 import argparse
-from data import detection_collate, VOCroot, VOC_CLASSES, VOC
+from data import detection_collate, VOC, SpaceNet
 from utils.augmentations import SSDAugmentation
-from layers.modules import MultiBoxLoss
+from layers import MultiBoxLoss
 from ssd import build_ssd
 import numpy as np
 import time
@@ -18,7 +18,6 @@ from retina import Retina
 from torchvision import transforms
 from tensorboardX import SummaryWriter
 import torchvision.utils as vutils
-from layers import point_form
 
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
@@ -38,24 +37,48 @@ def load_checkpoint(net, args):
     else:
         net.init_weights()
 
-_transform = transforms.Compose([
-    transforms.Resize((300, 300)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+class Transform:
+    def __init__(self, size):
+        self.transform = transforms.Compose([
+            transforms.Resize((size, size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
-def transform(img, target):
-    '''
-    img : PIL image
-    target ndarray[N, 5] - minx, miny, maxx, maxy, class
-    '''
-    img_data = _transform(img)
+    def __call__(self, img, target):
+        '''
+        img : PIL image
+        target ndarray[N, 5] - minx, miny, maxx, maxy, class
+        '''
+        img_data = self.transform(img)
+        if len(target) > 0:
+            target[:, (0, 2)] /= float(img.width)
+            target[:, (1, 3)] /= float(img.height)
+        return img_data, target
 
-    target[:, (0, 2)] /= float(img.width)
-    target[:, (1, 3)] /= float(img.height)
-    return img_data, target
+def plot_training_data(args, inputs, targets, iter):
+    r = np.random.randint(0, len(inputs))
+    img = inputs[r].cpu().numpy().transpose((1,2,0))[:, :, (2,1,0)]
+    target = targets[r].cpu().numpy()
 
-def train(net, args):
+    img = img - img.min(axis=(0, 1))
+    img = img / img.max(axis=(0, 1)) * 255
+    img = img.round().astype('uint8')
+
+    target = target[:,:4] * img.shape[0]
+
+    img = img.copy()
+
+    for box in target.round().astype(int):
+        cv2.rectangle(img, tuple(box[:2]), tuple(box[2:]), (0,0,255))
+
+
+    img = img[:, :, (2,1,0)].transpose((2, 0, 1))
+    img = torch.from_numpy(img)
+
+    args.writer.add_image('training_data', img, iter)
+
+def train(net, dataset, args):
     optimizer = optim.SGD(net.parameters(), lr=args.lr,
                       momentum=args.momentum, weight_decay=args.weight_decay)
     criterion = MultiBoxLoss(args.num_classes, 0.5, True, 0, True, 3, 0.5, False, args.cuda)
@@ -65,7 +88,6 @@ def train(net, args):
     loc_loss = 0  # epoch
     conf_loss = 0
 
-    dataset = VOC(args.voc_root, transform=transform)
     data_loader = data.DataLoader(dataset, args.batch_size, # num_workers=args.num_workers,
                                   shuffle=True, collate_fn=detection_collate)
     N = len(data_loader)
@@ -76,6 +98,8 @@ def train(net, args):
         for i, (images, targets) in enumerate(data_loader):
             if epoch in args.stepvalues:
                 adjust_learning_rate(optimizer, args.gamma, epoch)
+
+            # plot_training_data(args, images, targets, N * epoch + i)
 
             images = mk_var(images)
             targets = [mk_var(anno) for anno in targets]
@@ -97,27 +121,6 @@ def train(net, args):
             args.writer.add_scalar('data/loss_l', loss_l.data[0], N * epoch + i)
             args.writer.add_scalar('data/loss_c', loss_c.data[0], N * epoch + i)
 
-            # if i % 10 == 0:
-            #     ridx = np.random.randint(0, args.batch_size)
-            #     loc, conf, _ = list(zip(*out))[ridx]
-            #     img = images[ridx].data.cpu().numpy().transpose((1,2,0))
-
-            #     loc = point_form(loc)
-            #     probs = F.softmax(conf, dim=1)
-            #     max_vals, max_inds = probs[:, 1:].max(dim=1)
-            #     scores, indices = max_vals.sort(descending=True)
-
-            #     N = min(100, max((scores > 0.2).sum().data[0], 5))
-            #     for i in range(N):
-            #         box = loc[indices[i]].clamp(0, 1).squeeze()
-            #         if box[0].data[0] > box[2].data[0] or box[1].data[0] > box[3].data[0]:
-            #             break
-            #         box *= 300
-            #         box[:, (0, 2)] +
-            #         cv2.rectangle()
-
-            #         pdb.set_trace()
-
             print('%d: [%d/%d] || Loss: %.4f' % (epoch, i, N, loss.data[0]))
 
         save_checkpoint(net, args, epoch, os.path.join(args.checkpoint_dir, 'epoch_%d.pth' % epoch))
@@ -130,7 +133,6 @@ def adjust_learning_rate(optimizer, gamma, step):
     lr = args.lr * (gamma ** (step))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Single Shot MultiBox Detector Training')
@@ -148,13 +150,18 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', default=0.1, type=float, help='Gamma update for SGD')
     parser.add_argument('--save_folder', default='weights/', help='Location to save checkpoint models')
     parser.add_argument('--epochs', default=100, type=int, help='Maximum training epochs')
-    parser.add_argument('--voc_root', default=VOCroot, help='Location of VOC root directory')
+    parser.add_argument('--train_data', required=True, help='Path to training data')
     parser.add_argument('--ssd_size', default=300, type=int, help='Input dimensions for SSD')
     args = parser.parse_args()
 
+    if 'VOC' in args.train_data:
+        dataset = VOC(args.train_data, transform=Transform(args.ssd_size))
+    else:
+        dataset = SpaceNet(args.train_data, transform=Transform(args.ssd_size))
+
     args.checkpoint_dir = os.path.join(args.save_folder, 'ssd_%s' % datetime.now().isoformat())
     args.means = (104, 117, 123)  # only support voc now
-    args.num_classes = len(VOC_CLASSES) + 1
+    args.num_classes = len(dataset.classes) + 1
     args.stepvalues = (20, 50, 70)
     args.start_iter = 0
     args.writer = SummaryWriter()
@@ -164,15 +171,14 @@ if __name__ == '__main__':
     default_type = 'torch.cuda.FloatTensor' if args.cuda else 'torch.FloatTensor'
     torch.set_default_tensor_type(default_type)
 
-    # net = build_ssd('train', args.ssd_size, args.num_classes)
-
-    net = Retina(VOC_CLASSES)
+    net = Retina(dataset.classes, args.ssd_size)
 
     if args.cuda:
         net = net.cuda()
 
+
     load_checkpoint(net, args)
-    train(net, args)
+    train(net, dataset, args)
 
 
 
